@@ -20,13 +20,19 @@ const glados = async () => {
     process.exitCode = 1
     return ['Checkin Error: GLADOS secret is missing']
   }
-  for (const [index, cookie] of String(process.env.GLADOS).split('\n').entries()) {
-    if (!cookie.trim()) continue
+  const cookies = String(process.env.GLADOS).split(/\r?\n/).map((cookie) => cookie.trim()).filter(Boolean)
+  const agents = String(process.env.GLADOS_UA || '').split(/\r?\n/).map((ua) => ua.trim()).filter(Boolean)
+  if (!agents.length || (agents.length !== 1 && agents.length !== cookies.length)) {
+    console.error('GLADOS_UA secret is missing or does not match the account count')
+    process.exitCode = 1
+    return ['Checkin Error: GLADOS_UA configuration is invalid']
+  }
+  for (const [index, cookie] of cookies.entries()) {
     try {
       const common = {
         'cookie': cookie.trim(),
         'referer': 'https://glados.cloud/console/checkin',
-        'user-agent': 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0)',
+        'user-agent': agents[index] || agents[0],
       }
       const action = await requestJson('https://glados.cloud/api/user/checkin', {
         method: 'POST',
