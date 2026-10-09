@@ -33,8 +33,17 @@ const glados = async () => {
         headers: { ...common, 'content-type': 'application/json' },
         body: '{"token":"glados.cloud"}',
       })
-      const repeated = /checkin\s+repeats/i.test(String(action?.message || ''))
-      if (action?.code && !repeated) throw new Error('check-in API rejected')
+      const message = String(action?.message || '')
+      const repeated = /checkin\s+repeats/i.test(message)
+      const normal = repeated || /checkin!\s*got|today's observation logged/i.test(message)
+      if (action?.code && !normal) {
+        const reason = /please checkin via/i.test(message) ? 'domain rejected'
+          : /cookie|log.?in|sign.?in|expired|unauthorized/i.test(message) ? 'authentication rejected'
+          : /captcha|cloudflare|challenge/i.test(message) ? 'browser challenge'
+          : 'other response'
+        const code = String(action.code).replace(/[^0-9-]/g, '').slice(0, 8) || 'unknown'
+        throw new Error(`check-in API rejected (code ${code}; ${reason})`)
+      }
       const status = await requestJson('https://glados.cloud/api/user/status', {
         method: 'GET',
         headers: { ...common },
