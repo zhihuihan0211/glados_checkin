@@ -1,38 +1,57 @@
+const requestJson = async (url, options) => {
+  const response = await fetch(url, options)
+  if (!response.ok) throw new Error(`Request failed (HTTP ${response.status})`)
+  return response.json()
+}
+
+const sendNotification = async (url, options) => {
+  const response = await fetch(url, options)
+  if (!response.ok) throw new Error(`Notification HTTP ${response.status}`)
+}
+
 const glados = async () => {
   const notice = []
-  if (!process.env.GLADOS) return
-  for (const cookie of String(process.env.GLADOS).split('\n')) {
-    if (!cookie) continue
+  if (!process.env.GLADOS?.trim()) {
+    console.error('GLADOS secret is missing')
+    process.exitCode = 1
+    return ['Checkin Error: GLADOS secret is missing']
+  }
+  for (const [index, cookie] of String(process.env.GLADOS).split('\n').entries()) {
+    if (!cookie.trim()) continue
     try {
       const common = {
-        'cookie': cookie,
+        'cookie': cookie.trim(),
         'referer': 'https://glados.cloud/console/checkin',
         'user-agent': 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0)',
       }
-      const action = await fetch('https://glados.cloud/api/user/checkin', {
+      const action = await requestJson('https://glados.cloud/api/user/checkin', {
         method: 'POST',
         headers: { ...common, 'content-type': 'application/json' },
         body: '{"token":"glados.cloud"}',
-      }).then((r) => r.json())
+      })
       if (action?.code) throw new Error(action?.message)
-      const status = await fetch('https://glados.cloud/api/user/status', {
+      const status = await requestJson('https://glados.cloud/api/user/status', {
         method: 'GET',
         headers: { ...common },
-      }).then((r) => r.json())
+      })
       if (status?.code) throw new Error(status?.message)
+      console.log(`Account ${index + 1}: check-in succeeded`)
       notice.push(
-        'Checkin OK',
+        `Account ${index + 1}: check-in succeeded`,
         `${action?.message}`,
         `Left Days ${Number(status?.data?.leftDays)}`
       )
     } catch (error) {
+      console.error(`Account ${index + 1}: check-in failed`)
+      process.exitCode = 1
       notice.push(
-        'Checkin Error',
+        `Account ${index + 1}: check-in failed`,
         `${error}`,
         `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`
       )
     }
   }
+  notice.unshift(process.exitCode ? 'Checkin Error' : 'Checkin OK')
   return notice
 }
 
@@ -46,7 +65,7 @@ const notify = async (notice) => {
           console.log(line)
         }
       } else if (option.startsWith('wxpusher:')) {
-        await fetch(`https://wxpusher.zjiecode.com/api/send/message`, {
+        await sendNotification(`https://wxpusher.zjiecode.com/api/send/message`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -58,7 +77,7 @@ const notify = async (notice) => {
           }),
         })
       } else if (option.startsWith('pushplus:')) {
-        await fetch(`https://www.pushplus.plus/send`, {
+        await sendNotification(`https://www.pushplus.plus/send`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -69,7 +88,7 @@ const notify = async (notice) => {
           }),
         })
       } else if (option.startsWith('bark:')) {
-        await fetch(`https://api.day.app/${option.split(':')[1]}`, {
+        await sendNotification(`https://api.day.app/${option.split(':')[1]}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -80,7 +99,7 @@ const notify = async (notice) => {
       } else if (option.startsWith('qyweixin:')) {
         const qyweixinToken = option.split(':')[1]
         const qyweixinNotifyRebotUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + qyweixinToken;
-        await fetch(qyweixinNotifyRebotUrl, {
+        await sendNotification(qyweixinNotifyRebotUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -92,7 +111,7 @@ const notify = async (notice) => {
         })
       } else {
         // fallback
-        await fetch(`https://www.pushplus.plus/send`, {
+        await sendNotification(`https://www.pushplus.plus/send`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -113,4 +132,8 @@ const main = async () => {
   await notify(await glados())
 }
 
-main()
+main().catch((error) => {
+  const message = String(error?.message || '')
+  console.error(message.startsWith('Notification HTTP ') ? message : 'Notification request failed')
+  process.exitCode = 1
+})
