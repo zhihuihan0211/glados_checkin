@@ -1,7 +1,11 @@
 const requestJson = async (url, options) => {
   const response = await fetch(url, options)
   if (!response.ok) throw new Error(`Request failed (HTTP ${response.status})`)
-  return response.json()
+  try {
+    return await response.json()
+  } catch {
+    throw new Error('Invalid JSON response')
+  }
 }
 
 const sendNotification = async (url, options) => {
@@ -29,20 +33,21 @@ const glados = async () => {
         headers: { ...common, 'content-type': 'application/json' },
         body: '{"token":"glados.cloud"}',
       })
-      if (action?.code) throw new Error(action?.message)
+      const repeated = /checkin\s+repeats/i.test(String(action?.message || ''))
+      if (action?.code && !repeated) throw new Error('check-in API rejected')
       const status = await requestJson('https://glados.cloud/api/user/status', {
         method: 'GET',
         headers: { ...common },
       })
-      if (status?.code) throw new Error(status?.message)
-      console.log(`Account ${index + 1}: check-in succeeded`)
+      if (status?.code) throw new Error('status API rejected')
+      console.log(`Account ${index + 1}: ${repeated ? 'already checked in' : 'check-in succeeded'}`)
       notice.push(
-        `Account ${index + 1}: check-in succeeded`,
+        `Account ${index + 1}: ${repeated ? 'already checked in' : 'check-in succeeded'}`,
         `${action?.message}`,
         `Left Days ${Number(status?.data?.leftDays)}`
       )
     } catch (error) {
-      console.error(`Account ${index + 1}: check-in failed`)
+      console.error(`Account ${index + 1}: check-in failed (${error instanceof Error ? error.message : 'unknown error'})`)
       process.exitCode = 1
       notice.push(
         `Account ${index + 1}: check-in failed`,
