@@ -9,16 +9,24 @@ const mask = (str, startLen = 4, endLen = 4) => {
 // ========== GLaDOS 签到核心逻辑 ==========
 const glados = async () => {
   const notice = []
+  let successCount = 0
+  let failCount = 0
   console.log('========== GLaDOS 签到任务开始 ==========')
 
   // 环境变量检测
   if (!process.env.GLADOS) {
-    console.log('⚠️  未配置 GLADOS 环境变量，跳过签到任务')
+    console.error('未配置 GLADOS Secret')
+    process.exitCode = 1
     return notice
   }
 
-  const agents = String(process.env.GLADOS_UA || '').split('\n').filter(Boolean)
-  const cookies = String(process.env.GLADOS).split('\n').filter(Boolean)
+  const agents = String(process.env.GLADOS_UA || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)
+  const cookies = String(process.env.GLADOS).split(/\r?\n/).map(x => x.trim()).filter(Boolean)
+  if (!agents.length || (agents.length !== 1 && agents.length !== cookies.length)) {
+    console.error('GLADOS_UA Secret 缺失或与账号数量不匹配')
+    process.exitCode = 1
+    return notice
+  }
 
   console.log(`📋 共检测到 ${cookies.length} 个账号`)
   console.log(`📋 自定义 UA 数量: ${agents.length}${agents.length < cookies.length ? '（不足时将使用默认UA）' : ''}`)
@@ -26,14 +34,12 @@ const glados = async () => {
   for (const [index, cookie] of cookies.entries()) {
     const accountNo = index + 1
     console.log(`\n[账号 ${accountNo}] ---------- 开始处理 ----------`)
-    console.log(`[账号 ${accountNo}] Cookie: ${mask(cookie)}`)
 
     try {
       const domain = process.env.DOMAIN || 'glados.cloud'
-      const ua = agents[index] || agents[0] || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+      const ua = agents[index] || agents[0]
       
       console.log(`[账号 ${accountNo}] 目标域名: ${domain}`)
-      console.log(`[账号 ${accountNo}] UA: ${mask(ua, 8, 8)}`)
 
       const common = {
         'cookie': cookie,
@@ -57,8 +63,16 @@ const glados = async () => {
       const action = await checkinRes.json()
       console.log(`[账号 ${accountNo}] 签到接口响应码: ${action?.code ?? '无'}`)
 
-      if (action?.code !== 0) {
-        throw new Error(`${action?.message || '签到失败'} (code=${action.code}${action?.reason ? ', reason=' + action.reason : ''})`)
+      const actionMessage = String(action?.message || '')
+      const repeated = /checkin\s+repeats/i.test(actionMessage)
+      const normal = repeated || /checkin!\s*got|today's observation logged/i.test(actionMessage)
+      if (Number(action?.code) !== 0 && !normal) {
+        const reason = /please checkin via/i.test(actionMessage) ? '域名被拒绝'
+          : /cookie|log.?in|sign.?in|expired|unauthorized|没有权限/i.test(actionMessage) ? '登录或权限被拒绝'
+          : /captcha|cloudflare|challenge/i.test(actionMessage) ? '浏览器验证'
+          : '其他响应'
+        const code = String(action?.code).replace(/[^0-9-]/g, '').slice(0, 8) || 'unknown'
+        throw new Error(`签到接口拒绝 (code=${code}, ${reason})`)
       }
 
       // 2. 获取账号状态（签到后更新剩余天数）
@@ -75,40 +89,33 @@ const glados = async () => {
       const status = await statusRes.json()
       console.log(`[账号 ${accountNo}] 状态接口响应码: ${status?.code ?? '无'}`)
 
-      if (status?.code !== 0) {
-        throw new Error(`登录状态异常: ${status?.message || '未知错误'} (code=${status.code})`)
+      if (Number(status?.code) !== 0) {
+        const code = String(status?.code).replace(/[^0-9-]/g, '').slice(0, 8) || 'unknown'
+        throw new Error(`登录状态异常 (code=${code})`)
       }
 
       // 签到成功
       const leftDays = Number(status?.data?.leftDays)
-      console.log(`[账号 ${accountNo}] ✅ 签到成功`)
-      console.log(`[账号 ${accountNo}] 返回消息: ${action.message}`)
-      console.log(`[账号 ${accountNo}] 剩余天数: ${leftDays} 天`)
-
-      notice.push(
-        `【账号${accountNo}】签到成功`,
-        `${action?.message}`,
-        `剩余天数: ${leftDays} 天`
-      )
+      if (!Number.isFinite(leftDays)) throw new Error('状态接口缺少有效剩余天数')
+      successCount += 1
+      console.log(`[账号 ${accountNo}] ${repeated ? '今日已签到' : '签到成功'}；剩余 ${leftDays} 天`)
+      notice.push(`【账号${accountNo}】${repeated ? '今日已签到' : '签到成功'}；剩余 ${leftDays} 天`)
 
     } catch (error) {
-      console.error(`[账号 ${accountNo}] ❌ 签到失败`)
-      console.error(`[账号 ${accountNo}] 错误详情: ${error.message}`)
-      
-      notice.push(
-        `【账号${accountNo}】签到失败`,
-        `错误: ${error.message}`,
-        `仓库地址: <${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`
-      )
+      failCount += 1
+      process.exitCode = 1
+      const message = String(error?.message || '')
+      const detail = /^(签到接口HTTP错误:|状态接口HTTP错误:|签到接口拒绝|登录状态异常|状态接口缺少有效剩余天数)/.test(message)
+        ? message : '网络或响应解析错误'
+      console.error(`[账号 ${accountNo}] 签到失败：${detail}`)
+      notice.push(`【账号${accountNo}】签到失败：${detail}`)
     }
   }
 
   // 汇总统计
-  const successCount = notice.filter(n => n.includes('签到成功')).length
-  const failCount = notice.filter(n => n.includes('签到失败')).length
   console.log('\n========== 签到任务处理完成 ==========')
   console.log(`📊 统计结果：成功 ${successCount} 个 | 失败 ${failCount} 个`)
-
+  notice.unshift(failCount ? 'GLaDOS 签到失败' : 'GLaDOS 签到成功')
   return notice
 }
 
@@ -150,7 +157,6 @@ const notify = async (notice) => {
         const appToken = parts[1]
         const uids = parts.slice(2)
         
-        console.log(`[通知 ${channelNo}] appToken: ${mask(appToken)}`)
         console.log(`[通知 ${channelNo}] 推送UID数量: ${uids.length}`)
 
         const res = await fetch(`https://wxpusher.zjiecode.com/api/send/message`, {
@@ -165,11 +171,11 @@ const notify = async (notice) => {
           }),
         })
 
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const result = await res.json()
-        console.log(`[通知 ${channelNo}] 接口完整响应: ${JSON.stringify(result)}`)
 
         if (result.code !== 1000) {
-          throw new Error(`${result.msg} (code=${result.code})`)
+          throw new Error(`接口返回 code=${Number(result.code)}`)
         }
         console.log(`[通知 ${channelNo}] ✅ WxPusher 推送成功`)
 
@@ -178,7 +184,6 @@ const notify = async (notice) => {
         console.log(`\n[通知 ${channelNo}] 正在推送至 ${channelType}`)
         
         const token = option.split(':')[1]
-        console.log(`[通知 ${channelNo}] Token: ${mask(token)}`)
 
         const res = await fetch(`https://www.pushplus.plus/send`, {
           method: 'POST',
@@ -191,11 +196,11 @@ const notify = async (notice) => {
           }),
         })
 
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const result = await res.json()
-        console.log(`[通知 ${channelNo}] 接口完整响应: ${JSON.stringify(result)}`)
 
         if (result.code !== 200) {
-          throw new Error(`${result.msg} (code=${result.code})`)
+          throw new Error(`接口返回 code=${Number(result.code)}`)
         }
         console.log(`[通知 ${channelNo}] ✅ PushPlus 推送成功`)
 
@@ -204,7 +209,6 @@ const notify = async (notice) => {
         console.log(`\n[通知 ${channelNo}] 正在推送至 ${channelType}`)
         
         const barkKey = option.split(':')[1]
-        console.log(`[通知 ${channelNo}] Bark密钥: ${mask(barkKey)}`)
 
         const res = await fetch(`https://api.day.app/${barkKey}`, {
           method: 'POST',
@@ -215,11 +219,11 @@ const notify = async (notice) => {
           }),
         })
 
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const result = await res.json()
-        console.log(`[通知 ${channelNo}] 接口完整响应: ${JSON.stringify(result)}`)
 
         if (result.code !== 200) {
-          throw new Error(`${result.message} (code=${result.code})`)
+          throw new Error(`接口返回 code=${Number(result.code)}`)
         }
         console.log(`[通知 ${channelNo}] ✅ Bark 推送成功`)
 
@@ -228,7 +232,6 @@ const notify = async (notice) => {
         console.log(`\n[通知 ${channelNo}] 正在推送至 ${channelType}`)
         
         const qyToken = option.split(':')[1]
-        console.log(`[通知 ${channelNo}] Webhook Key: ${mask(qyToken)}`)
 
         const qyweixinNotifyRebotUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + qyToken
         const res = await fetch(qyweixinNotifyRebotUrl, {
@@ -242,11 +245,11 @@ const notify = async (notice) => {
           }),
         })
 
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const result = await res.json()
-        console.log(`[通知 ${channelNo}] 接口完整响应: ${JSON.stringify(result)}`)
 
         if (result.errcode !== 0) {
-          throw new Error(`${result.errmsg} (errcode=${result.errcode})`)
+          throw new Error(`接口返回 errcode=${Number(result.errcode)}`)
         }
         console.log(`[通知 ${channelNo}] ✅ 企业微信推送成功`)
 
@@ -254,7 +257,6 @@ const notify = async (notice) => {
         // 兼容旧格式：无前缀默认走 pushplus
         channelType = '默认PushPlus(兼容旧格式)'
         console.log(`\n[通知 ${channelNo}] 未识别渠道前缀，使用 ${channelType}`)
-        console.log(`[通知 ${channelNo}] Token: ${mask(option)}`)
 
         const res = await fetch(`https://www.pushplus.plus/send`, {
           method: 'POST',
@@ -267,18 +269,21 @@ const notify = async (notice) => {
           }),
         })
 
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const result = await res.json()
-        console.log(`[通知 ${channelNo}] 接口完整响应: ${JSON.stringify(result)}`)
 
         if (result.code !== 200) {
-          throw new Error(`${result.msg} (code=${result.code})`)
+          throw new Error(`接口返回 code=${Number(result.code)}`)
         }
         console.log(`[通知 ${channelNo}] ✅ PushPlus 推送成功`)
       }
 
     } catch (error) {
       console.error(`[通知 ${channelNo}] ❌ ${channelType} 推送失败`)
-      console.error(`[通知 ${channelNo}] 错误详情: ${error.message}`)
+      const message = String(error?.message || '')
+      const detail = /^HTTP \d+$|^接口返回 (?:code|errcode)=/.test(message) ? message : '网络或响应解析错误'
+      console.error(`[通知 ${channelNo}] ${detail}`)
+      process.exitCode = 1
       // 单个渠道失败不中断其他渠道推送
     }
   }
@@ -294,7 +299,7 @@ const main = async () => {
 }
 
 // 全局错误捕获，避免程序静默失败
-main().catch(err => {
-  console.error('❌ 全局未捕获错误:', err)
-  process.exit(1)
+main().catch(() => {
+  console.error('未捕获错误')
+  process.exitCode = 1
 })
