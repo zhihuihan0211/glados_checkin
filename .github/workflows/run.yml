@@ -22,5 +22,6 @@ jobs:
           GLADOS_UA: ${{ secrets.GLADOS_UA }}
           DOMAIN: ${{ secrets.DOMAIN }}
           NOTIFY: ${{ secrets.NOTIFY }}
-          AUTO_EXCHANGE: ${{ vars.AUTO_EXCHANGE || 'false' }}
+          # 保持关闭，避免仓库已有变量意外开启兑换。
+          AUTO_EXCHANGE: 'false'
           EXCHANGE_THRESHOLD: ${{ vars.EXCHANGE_THRESHOLD || '500' }}

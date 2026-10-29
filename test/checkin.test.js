@@ -88,6 +88,6 @@ test('notification HTTP failures fail the task for every supported channel', asy
 test('workflow push is main-only and opt-in variables are passed', () => {
   const workflow = readFileSync(new URL('../.github/workflows/run.yml', import.meta.url), 'utf8')
   assert.match(workflow, /push:\n    branches: \[main\]/)
-  assert.match(workflow, /AUTO_EXCHANGE: \$\{\{ vars.AUTO_EXCHANGE \|\| 'false' \}\}/)
+  assert.match(workflow, /AUTO_EXCHANGE: 'false'/)
   assert.match(workflow, /EXCHANGE_THRESHOLD: \$\{\{ vars.EXCHANGE_THRESHOLD \|\| '500' \}\}/)
 })

@@ -21,7 +21,7 @@ GitHub Actions 实现 [GLaDOS][glados] 自动签到
 
 1. 启用 Actions, 每天北京时间 00:10 自动签到
 1. 日志和通知展示每个账号当前积分及汇总；识别今日已签到，保留成功/失败统计。签到或通知失败以非零状态退出。
-1. 自动兑换**默认关闭**。如需开启，在 Settings → Secrets and variables → Actions → Variables 添加以下仓库变量（不是 Secrets）：
+1. 自动兑换**默认关闭**。当前工作流固定传入 `AUTO_EXCHANGE=false`，已有仓库变量无法开启兑换。如未来需要开启，先将 `run.yml` 的该值改为 `${{ vars.AUTO_EXCHANGE || 'false' }}`，再在 Settings → Secrets and variables → Actions → Variables 添加以下仓库变量（不是 Secrets）：
 
 | 变量 | 默认值 | 说明 |
 | ---- | ---- | ---- |
