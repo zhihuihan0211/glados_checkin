@@ -1,14 +1,11 @@
-// ========== 工具函数：敏感信息脱敏 ==========
-// 只显示首尾各4位，避免日志泄露密钥
-const mask = (str, startLen = 4, endLen = 4) => {
-  if (!str || typeof str !== 'string') return '***'
-  if (str.length <= startLen + endLen) return '*'.repeat(str.length)
-  return str.slice(0, startLen) + '****' + str.slice(-endLen)
-}
+// 仅输出数值响应码，禁止原始响应或凭据片段进入日志。
+const safeCode = value => /^-?\d{1,8}$/.test(String(value)) ? String(value) : 'unknown'
+const validNumber = value => value !== null && value !== undefined && String(value).trim() !== '' && Number.isFinite(Number(value))
 
 // ========== GLaDOS 签到核心逻辑 ==========
 const glados = async () => {
   const notice = []
+  const pointsSummary = []
   let successCount = 0
   let failCount = 0
   console.log('========== GLaDOS 签到任务开始 ==========')
@@ -22,14 +19,14 @@ const glados = async () => {
 
   const agents = String(process.env.GLADOS_UA || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)
   const cookies = String(process.env.GLADOS).split(/\r?\n/).map(x => x.trim()).filter(Boolean)
-  if (!agents.length || (agents.length !== 1 && agents.length !== cookies.length)) {
+  if (!cookies.length || !agents.length || (agents.length !== 1 && agents.length !== cookies.length)) {
     console.error('GLADOS_UA Secret 缺失或与账号数量不匹配')
     process.exitCode = 1
     return notice
   }
 
   console.log(`📋 共检测到 ${cookies.length} 个账号`)
-  console.log(`📋 自定义 UA 数量: ${agents.length}${agents.length < cookies.length ? '（不足时将使用默认UA）' : ''}`)
+  console.log(`📋 自定义 UA 数量: ${agents.length}${agents.length === 1 ? '（所有账号共用）' : ''}`)
 
   for (const [index, cookie] of cookies.entries()) {
     const accountNo = index + 1
@@ -57,14 +54,14 @@ const glados = async () => {
 
       // HTTP 层错误捕获（网络错误、404、500等）
       if (!checkinRes.ok) {
-        throw new Error(`签到接口HTTP错误: ${checkinRes.status} ${checkinRes.statusText}`)
+        throw new Error(`签到接口HTTP错误: ${checkinRes.status}`)
       }
 
       const action = await checkinRes.json()
-      console.log(`[账号 ${accountNo}] 签到接口响应码: ${action?.code ?? '无'}`)
+      console.log(`[账号 ${accountNo}] 签到接口响应码: ${safeCode(action?.code)}`)
 
       const actionMessage = String(action?.message || '')
-      const repeated = /checkin\s+repeats/i.test(actionMessage)
+      const repeated = Number(action?.code) === 1 || /checkin\s+repeats/i.test(actionMessage)
       const normal = repeated || /checkin!\s*got|today's observation logged/i.test(actionMessage)
       if (Number(action?.code) !== 0 && !normal) {
         const reason = /please checkin via/i.test(actionMessage) ? '域名被拒绝'
@@ -83,11 +80,11 @@ const glados = async () => {
       })
 
       if (!statusRes.ok) {
-        throw new Error(`状态接口HTTP错误: ${statusRes.status} ${statusRes.statusText}`)
+        throw new Error(`状态接口HTTP错误: ${statusRes.status}`)
       }
 
       const status = await statusRes.json()
-      console.log(`[账号 ${accountNo}] 状态接口响应码: ${status?.code ?? '无'}`)
+      console.log(`[账号 ${accountNo}] 状态接口响应码: ${safeCode(status?.code)}`)
 
       if (Number(status?.code) !== 0) {
         const code = String(status?.code).replace(/[^0-9-]/g, '').slice(0, 8) || 'unknown'
@@ -95,11 +92,73 @@ const glados = async () => {
       }
 
       // 签到成功
-      const leftDays = Number(status?.data?.leftDays)
-      if (!Number.isFinite(leftDays)) throw new Error('状态接口缺少有效剩余天数')
+      let leftDays = Number(status?.data?.leftDays)
+      if (!validNumber(status?.data?.leftDays)) throw new Error('状态接口缺少有效剩余天数')
+      // 积分查询失败不改变签到结果；不将无效响应当成 0 分。
+      const queryPoints = async () => {
+        const res = await fetch(`https://${domain}/api/user/points`, { headers: { ...common } })
+        if (!res.ok) throw new Error('积分查询失败')
+        const data = await res.json()
+        if (Number(data?.code) !== 0 || !validNumber(data?.points) || Number(data.points) < 0) throw new Error('积分数据无效')
+        return Number(data.points)
+      }
+      let currentPoints = null
+      try {
+        currentPoints = await queryPoints()
+      } catch {
+        console.warn(`[账号 ${accountNo}] 积分查询失败`)
+      }
+
+      // 必须显式设置 true 才允许兑换；plan500 每次消耗 500 积分。
+      const autoExchange = String(process.env.AUTO_EXCHANGE || '').trim().toLowerCase() === 'true'
+      const exchangeThreshold = Number(process.env.EXCHANGE_THRESHOLD || 500)
+      if (autoExchange && (!Number.isFinite(exchangeThreshold) || exchangeThreshold < 500)) {
+        process.exitCode = 1
+        notice.push(`【账号${accountNo}】自动兑换配置无效：阈值必须至少为 500`)
+      } else if (autoExchange && currentPoints !== null && currentPoints >= exchangeThreshold) {
+        let exchanged = false
+        try {
+          const res = await fetch(`https://${domain}/api/user/exchange`, {
+            method: 'POST',
+            headers: { ...common, 'content-type': 'application/json' },
+            body: JSON.stringify({ planType: 'plan500' }),
+          })
+          if (!res.ok) throw new Error('兑换请求失败')
+          const data = await res.json()
+          if (Number(data?.code) !== 0) throw new Error('兑换被拒绝')
+          exchanged = true
+          notice.push(`【账号${accountNo}】自动兑换成功：消耗500积分兑换100天`)
+        } catch {
+          process.exitCode = 1
+          console.error(`[账号 ${accountNo}] 自动兑换请求失败或结果无法确认，请核对账号；本次不重试`)
+          notice.push(`【账号${accountNo}】自动兑换失败或结果未确认`)
+        }
+        // 即使响应丢失也可能已经兑换，重新查询，绝不展示兑换前的旧数据。
+        currentPoints = null
+        leftDays = null
+        try { currentPoints = await queryPoints() } catch {
+          console.warn(`[账号 ${accountNo}] 兑换后积分刷新失败`)
+        }
+        try {
+          const res = await fetch(`https://${domain}/api/user/status`, { headers: { ...common } })
+          if (!res.ok) throw new Error('状态刷新失败')
+          const data = await res.json()
+          if (Number(data?.code) !== 0 || !validNumber(data?.data?.leftDays)) throw new Error('状态刷新失败')
+          leftDays = Number(data.data.leftDays)
+        } catch {
+          console.warn(`[账号 ${accountNo}] 兑换后天数刷新失败`)
+        }
+        if (exchanged && (currentPoints === null || leftDays === null)) {
+          notice.push(`【账号${accountNo}】兑换已成功，部分余额刷新失败，请在控制台核对`)
+        }
+      }
+      const pointsText = currentPoints === null ? '查询失败' : `${currentPoints} 点`
+      const daysText = leftDays === null ? '刷新失败' : `${leftDays} 天`
+      pointsSummary.push(`账号${accountNo}: ${pointsText}`)
+      console.log(`[账号 ${accountNo}] 当前积分: ${pointsText}`)
       successCount += 1
-      console.log(`[账号 ${accountNo}] ${repeated ? '今日已签到' : '签到成功'}；剩余 ${leftDays} 天`)
-      notice.push(`【账号${accountNo}】${repeated ? '今日已签到' : '签到成功'}；剩余 ${leftDays} 天`)
+      console.log(`[账号 ${accountNo}] ${repeated ? '今日已签到' : '签到成功'}；剩余 ${daysText}`)
+      notice.push(`【账号${accountNo}】${repeated ? '今日已签到' : '签到成功'}；剩余 ${daysText}；当前积分 ${pointsText}`)
 
     } catch (error) {
       failCount += 1
@@ -113,9 +172,12 @@ const glados = async () => {
   }
 
   // 汇总统计
+  console.log('========== 各账号当前积分 ==========')
+  pointsSummary.forEach(line => console.log(line))
+  if (pointsSummary.length) notice.push('各账号当前积分', ...pointsSummary)
   console.log('\n========== 签到任务处理完成 ==========')
   console.log(`📊 统计结果：成功 ${successCount} 个 | 失败 ${failCount} 个`)
-  notice.unshift(failCount ? 'GLaDOS 签到失败' : 'GLaDOS 签到成功')
+  notice.unshift(failCount || process.exitCode ? 'GLaDOS 签到失败' : 'GLaDOS 签到成功')
   return notice
 }
 
@@ -133,7 +195,7 @@ const notify = async (notice) => {
     return
   }
 
-  const options = String(process.env.NOTIFY).split('\n').filter(Boolean)
+  const options = String(process.env.NOTIFY).split(/\r?\n/).map(x => x.trim()).filter(Boolean)
   console.log(`📋 共配置 ${options.length} 个通知渠道`)
 
   for (const [idx, option] of options.entries()) {

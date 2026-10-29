@@ -3,6 +3,7 @@ name: run
 on:
   workflow_dispatch:
   push:
+    branches: [main]
   schedule:
     - cron: 10 16 * * *
 
@@ -21,3 +22,5 @@ jobs:
           GLADOS_UA: ${{ secrets.GLADOS_UA }}
           DOMAIN: ${{ secrets.DOMAIN }}
           NOTIFY: ${{ secrets.NOTIFY }}
+          AUTO_EXCHANGE: ${{ vars.AUTO_EXCHANGE || 'false' }}
+          EXCHANGE_THRESHOLD: ${{ vars.EXCHANGE_THRESHOLD || '500' }}
